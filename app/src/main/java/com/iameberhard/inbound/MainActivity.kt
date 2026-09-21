@@ -18,8 +18,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -64,11 +62,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -245,10 +242,6 @@ private fun Speedometer(viewModel: SpeedViewModel) {
     val live = trip.lastFixMs != 0L && now - trip.lastFixMs < FIX_TIMEOUT_MS
 
     val speed = if (live) trip.speedMps * factor else null
-    val steps = if (mph) listOf(40, 80, 120, 200, 320) else listOf(60, 120, 200, 320, 500)
-    val reference = maxOf(speed ?: 0f, trip.maxMps * factor)
-    val gaugeMax = steps.firstOrNull { it > reference } ?: steps.last()
-
     val distance = if (mph) trip.distanceM / METERS_PER_MILE else trip.distanceM / 1000.0
     val stats = listOf(
         "MAX" to "${(trip.maxMps * factor).roundToInt()} $unit",
@@ -257,7 +250,7 @@ private fun Speedometer(viewModel: SpeedViewModel) {
         "MOVING TIME" to formatDuration(trip.movingMs),
     )
 
-    // GPS status sits inside the dial, under the unit: a headline plus a smaller detail line.
+    // GPS status sits under the unit: a headline plus a smaller detail line.
     val satellites = viewModel.satellites
     val inView = viewModel.satellitesInView
     val accuracy = trip.accuracyM
@@ -282,9 +275,9 @@ private fun Speedometer(viewModel: SpeedViewModel) {
                 LocationOffRow(onEnableGps = { context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) })
             }
             if (wide) {
-                // Unfolded / landscape: gauge on the left, trip figures on the right.
+                // Unfolded / landscape: readout on the left, trip figures on the right.
                 Row(Modifier.weight(1f).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Gauge(speed, unit, gaugeMax, status, viewModel::toggleUnit, Modifier.weight(1f).fillMaxHeight())
+                    Readout(speed, unit, status, viewModel::toggleUnit, Modifier.weight(1f).fillMaxHeight())
                     Spacer(Modifier.width(16.dp))
                     Column(
                         Modifier.width(if (short) 340.dp else 300.dp).verticalScroll(rememberScrollState()),
@@ -299,7 +292,7 @@ private fun Speedometer(viewModel: SpeedViewModel) {
                     }
                 }
             } else {
-                Gauge(speed, unit, gaugeMax, status, viewModel::toggleUnit, Modifier.weight(1f).fillMaxWidth())
+                Readout(speed, unit, status, viewModel::toggleUnit, Modifier.weight(1f).fillMaxWidth())
                 EtaCard(viewModel, mph, now, pick, Modifier.fillMaxWidth())
                 Spacer(Modifier.height(10.dp))
                 StatGrid(stats, Modifier.fillMaxWidth())
@@ -531,77 +524,59 @@ private fun LocationOffRow(onEnableGps: () -> Unit) {
     }
 }
 
+/** Digital speed readout: LCD-style digits over dim "888" ghost segments, unit and GPS status below. */
 @Composable
-private fun Gauge(
+private fun Readout(
     speed: Float?,
     unit: String,
-    gaugeMax: Int,
     status: GpsStatus,
     onToggleUnit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
-        val side: Dp = min(maxWidth, maxHeight)
-        val stroke = side * 0.05f
-        val fraction by animateFloatAsState(
-            targetValue = ((speed ?: 0f) / gaugeMax).coerceIn(0f, 1f),
-            label = "gauge",
-        )
+        // Three monospace digits are about 1.8 em wide; the whole block about 1.9 em tall.
+        val em: Dp = min(maxWidth / 2f, maxHeight / 1.9f)
         val density = LocalDensity.current
-        val speedSize = with(density) { (side * 0.32f).toSp() }
-        val unitSize = with(density) { (side * 0.075f).toSp() }
-        val scaleSize = with(density) { (side * 0.045f).toSp() }
-        val statusSize = with(density) { (side * 0.06f).toSp() }
-        val detailSize = with(density) { (side * 0.042f).toSp() }
+        val digitSize = with(density) { em.toSp() }
+        val unitSize = with(density) { (em * 0.2f).toSp() }
+        val statusSize = with(density) { (em * 0.13f).toSp() }
+        val detailSize = with(density) { (em * 0.1f).toSp() }
+        val digits = TextStyle(
+            fontSize = digitSize,
+            lineHeight = digitSize,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+        )
 
-        Box(
-            Modifier
-                .size(side)
-                // Tapping the dial switches km/h <-> mph, same as the toggle below.
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onToggleUnit,
-                ),
-            contentAlignment = Alignment.Center,
+        Column(
+            // Tapping the readout switches km/h <-> mph, same as the toggle below.
+            Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onToggleUnit,
+            ),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Canvas(Modifier.fillMaxSize().padding(stroke)) {
-                val style = Stroke(width = stroke.toPx(), cap = StrokeCap.Round)
-                drawArc(Track, startAngle = 135f, sweepAngle = 270f, useCenter = false, style = style)
-                if (fraction > 0f) {
-                    drawArc(Accent, startAngle = 135f, sweepAngle = 270f * fraction, useCenter = false, style = style)
-                }
-            }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box {
+                Text("888", color = Track, style = digits, maxLines = 1)
                 Text(
-                    text = speed?.roundToInt()?.toString() ?: "–",
+                    // Right-aligned over the ghost digits, like a real display; dashes while there is no fix.
+                    text = (speed?.roundToInt()?.toString() ?: "--").padStart(3),
                     color = if (speed != null) Color.White else Muted,
-                    style = TextStyle(
-                        fontSize = speedSize,
-                        lineHeight = speedSize * 1.05f,
-                        fontWeight = FontWeight.Bold,
-                        fontFeatureSettings = "tnum",
-                    ),
-                )
-                Text(unit, color = Accent, style = TextStyle(fontSize = unitSize, fontWeight = FontWeight.Medium))
-                Spacer(Modifier.height(side * 0.025f))
-                Text(
-                    "● ${status.headline}",
-                    color = status.color,
-                    style = TextStyle(fontSize = statusSize, fontWeight = FontWeight.SemiBold),
+                    style = digits,
                     maxLines = 1,
                 )
-                if (status.detail != null) {
-                    Text(status.detail, color = Muted, style = TextStyle(fontSize = detailSize), maxLines = 1)
-                }
             }
-            // Scale ends, sitting in the open bottom of the arc.
-            Row(
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth(0.62f).padding(bottom = side * 0.06f),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text("0", color = Muted, style = TextStyle(fontSize = scaleSize))
-                Text("$gaugeMax", color = Muted, style = TextStyle(fontSize = scaleSize))
+            Text(unit, color = Accent, style = TextStyle(fontSize = unitSize, fontWeight = FontWeight.Medium))
+            Spacer(Modifier.height(em * 0.08f))
+            Text(
+                "● ${status.headline}",
+                color = status.color,
+                style = TextStyle(fontSize = statusSize, fontWeight = FontWeight.SemiBold),
+                maxLines = 1,
+            )
+            if (status.detail != null) {
+                Text(status.detail, color = Muted, style = TextStyle(fontSize = detailSize), maxLines = 1)
             }
         }
     }
