@@ -1,9 +1,6 @@
 package com.iameberhard.inbound
 
 import android.content.Context
-import android.graphics.ColorMatrixColorFilter
-import android.graphics.Paint
-import android.graphics.drawable.GradientDrawable
 import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -39,16 +36,38 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
-import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.XYTileSource
-import org.osmdroid.util.BoundingBox
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.CustomZoomButtonsController
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
-import org.osmdroid.views.overlay.Polyline
-import java.io.File
+import org.maplibre.android.MapLibre
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.geometry.LatLngBounds
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
+import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.Property
+import org.maplibre.android.style.layers.PropertyFactory.circleColor
+import org.maplibre.android.style.layers.PropertyFactory.circleRadius
+import org.maplibre.android.style.layers.PropertyFactory.circleStrokeColor
+import org.maplibre.android.style.layers.PropertyFactory.circleStrokeWidth
+import org.maplibre.android.style.layers.PropertyFactory.iconAllowOverlap
+import org.maplibre.android.style.layers.PropertyFactory.iconAnchor
+import org.maplibre.android.style.layers.PropertyFactory.iconIgnorePlacement
+import org.maplibre.android.style.layers.PropertyFactory.iconImage
+import org.maplibre.android.style.layers.PropertyFactory.lineCap
+import org.maplibre.android.style.layers.PropertyFactory.lineColor
+import org.maplibre.android.style.layers.PropertyFactory.lineJoin
+import org.maplibre.android.style.layers.PropertyFactory.lineWidth
+import org.maplibre.android.style.layers.SymbolLayer
+import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.FeatureCollection
+import org.maplibre.geojson.LineString
+import org.maplibre.geojson.Point
 import java.util.Date
 
 /**
@@ -74,11 +93,13 @@ internal fun MapScreen(viewModel: SpeedViewModel, onDismiss: () -> Unit) {
     val here = viewModel.position
 
     val map = remember { TripMap(context) }
-    DisposableEffect(Unit) {
-        map.view.onResume()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        // Adding the observer replays start/resume, so the map comes up in step with the activity.
+        lifecycle.addObserver(map.lifecycleObserver)
         onDispose {
-            map.view.onPause()
-            map.view.onDetach()
+            lifecycle.removeObserver(map.lifecycleObserver)
+            map.destroy()
         }
     }
     LaunchedEffect(leg?.route) { map.showRoute(leg?.route) }
@@ -144,7 +165,7 @@ internal fun MapScreen(viewModel: SpeedViewModel, onDismiss: () -> Unit) {
                 Button(onClick = { map.centreOn(viewModel.position) }, enabled = here != null) { Text("My location") }
             }
             Text(
-                "© OpenStreetMap contributors",
+                "© OpenFreeMap · © OpenStreetMap contributors",
                 color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
             )
@@ -152,117 +173,171 @@ internal fun MapScreen(viewModel: SpeedViewModel, onDismiss: () -> Unit) {
     }
 }
 
-/** The osmdroid view plus the three things drawn on it: the track, the destination pin, the position dot. */
+/**
+ * The MapLibre view plus the three things drawn on it: the track, the destination pin, the position dot.
+ * Vector tiles come from OpenFreeMap (no key); the bundled style labels everything in English.
+ *
+ * The map and its style load asynchronously, so what should be shown is kept here and (re)drawn whenever
+ * the style becomes ready.
+ */
 private class TripMap(context: Context) {
 
     val view: MapView
-    private val track: Polyline
-    private val destination: Marker
-    private val me: Marker
+
+    private var map: MapLibreMap? = null
+    private var style: Style? = null
+    private var route: RailRoute? = null
+    private var position: Pair<Double, Double>? = null
+    /** A camera move asked for before the map was ready. */
+    private var pendingCamera: (() -> Unit)? = null
+
+    private val padding = (72 * context.resources.displayMetrics.density).toInt()
+    private var started = false
+    private var resumed = false
+    private var destroyed = false
+
+    val lifecycleObserver = LifecycleEventObserver { _, event ->
+        when (event) {
+            Lifecycle.Event.ON_START -> start()
+            Lifecycle.Event.ON_RESUME -> resume()
+            Lifecycle.Event.ON_PAUSE -> pause()
+            Lifecycle.Event.ON_STOP -> stop()
+            else -> Unit
+        }
+    }
 
     init {
-        Configuration.getInstance().apply {
-            userAgentValue = "Inbound/1.0 (personal Android train ETA app)"
-            // Tile cache in the app's own cache dir: no storage permission, cleared with the app.
-            osmdroidBasePath = File(context.cacheDir, "osmdroid")
-            osmdroidTileCache = File(context.cacheDir, "osmdroid/tiles")
+        MapLibre.getInstance(context)
+        view = MapView(context)
+        view.onCreate(null)
+        view.getMapAsync { ready ->
+            map = ready
+            ready.uiSettings.apply {
+                setLogoEnabled(false)
+                setAttributionEnabled(false) // credited in our own corner text instead
+                setCompassEnabled(false)
+                setRotateGesturesEnabled(false)
+                setTiltGesturesEnabled(false)
+            }
+            val json = context.assets.open("map_dark.json").bufferedReader().use { it.readText() }
+            ready.setStyle(Style.Builder().fromJson(json)) { loaded ->
+                loaded.addSource(GeoJsonSource(ROUTE))
+                loaded.addLayer(
+                    LineLayer(ROUTE, ROUTE).withProperties(
+                        lineColor(Accent.toArgb()), lineWidth(4f),
+                        lineCap(Property.LINE_CAP_ROUND), lineJoin(Property.LINE_JOIN_ROUND),
+                    ),
+                )
+                ContextCompat.getDrawable(context, R.drawable.ic_pin)?.let { loaded.addImage(PIN, it) }
+                loaded.addSource(GeoJsonSource(PIN))
+                loaded.addLayer(
+                    SymbolLayer(PIN, PIN).withProperties(
+                        iconImage(PIN), iconAnchor(Property.ICON_ANCHOR_BOTTOM),
+                        iconAllowOverlap(true), iconIgnorePlacement(true),
+                    ),
+                )
+                loaded.addSource(GeoJsonSource(ME))
+                loaded.addLayer(
+                    CircleLayer(ME, ME).withProperties(
+                        circleRadius(8f), circleColor(android.graphics.Color.WHITE),
+                        circleStrokeWidth(3.5f), circleStrokeColor(Accent.toArgb()),
+                    ),
+                )
+                style = loaded
+                draw()
+                pendingCamera?.invoke()
+                pendingCamera = null
+            }
         }
-        view = MapView(context).apply {
-            setTileSource(LATIN_LABELS)
-            setMultiTouchControls(true)
-            zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
-            isTilesScaledToDpi = true
-            setMinZoomLevel(3.0)
-            isVerticalMapRepetitionEnabled = false
-            setScrollableAreaLimitLatitude(MapView.getTileSystem().maxLatitude, MapView.getTileSystem().minLatitude, 0)
-            // The app is dark throughout; inverted standard tiles make a decent night map.
-            overlayManager.tilesOverlay.setColorFilter(NIGHT)
-            controller.setZoom(5.0)
-        }
-        val density = context.resources.displayMetrics.density
-        track = Polyline(view).apply {
-            outlinePaint.color = Accent.toArgb()
-            outlinePaint.strokeWidth = 4 * density
-            outlinePaint.strokeCap = Paint.Cap.ROUND
-            outlinePaint.strokeJoin = Paint.Join.ROUND
-            setOnClickListener { _, _, _ -> false }
-        }
-        destination = Marker(view).apply {
-            setIcon(ContextCompat.getDrawable(context, R.drawable.ic_pin))
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            setInfoWindow(null)
-            setOnMarkerClickListener { _, _ -> true }
-            isEnabled = false
-        }
-        me = Marker(view).apply {
-            setIcon(GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(android.graphics.Color.WHITE)
-                setStroke((4 * density).toInt(), Accent.toArgb())
-                setSize((22 * density).toInt(), (22 * density).toInt())
-            })
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-            setInfoWindow(null)
-            setOnMarkerClickListener { _, _ -> true }
-            isEnabled = false
-        }
-        view.overlays.addAll(listOf(track, destination, me))
     }
 
     fun showRoute(route: RailRoute?) {
-        track.setPoints(if (route == null) emptyList() else List(route.lat.size) { GeoPoint(route.lat[it], route.lon[it]) })
-        destination.isEnabled = route != null
-        if (route != null) destination.position = GeoPoint(route.lat.last(), route.lon.last())
-        view.invalidate()
+        this.route = route
+        draw()
     }
 
     fun showPosition(position: Pair<Double, Double>?) {
-        me.isEnabled = position != null
-        if (position != null) me.position = GeoPoint(position.first, position.second)
-        view.invalidate()
+        this.position = position
+        draw()
     }
 
     fun centreOn(position: Pair<Double, Double>?) {
         if (position == null) return
-        whenLaidOut { view.controller.animateTo(GeoPoint(position.first, position.second), maxOf(view.zoomLevelDouble, 14.0), 600L) }
+        whenReady { map ->
+            val zoom = maxOf(map.cameraPosition.zoom, 12.5)
+            map.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(position.first, position.second), zoom), 600)
+        }
     }
 
     /** Everything still ahead: from the current position (or the start of the track) to the destination. */
     fun frameRoute(route: RailRoute, position: Pair<Double, Double>?) {
-        val points = MutableList(route.lat.size) { GeoPoint(route.lat[it], route.lon[it]) }
-        if (position != null) points += GeoPoint(position.first, position.second)
-        val box = BoundingBox.fromGeoPoints(points)
-        whenLaidOut {
-            if (box.latitudeSpan < 1e-4 && box.longitudeSpanWithDateLine < 1e-4) centreOn(position) else view.zoomToBoundingBox(box.increaseByScale(1.4f), true)
+        whenReady { map ->
+            val points = MutableList(route.lat.size) { LatLng(route.lat[it], route.lon[it]) }
+            if (position != null) points += LatLng(position.first, position.second)
+            try {
+                map.animateCamera(CameraUpdateFactory.newLatLngBounds(LatLngBounds.Builder().includes(points).build(), padding), 600)
+            } catch (_: RuntimeException) {
+                // All points in one spot (already there): no box to fit.
+                centreOn(position ?: (route.lat.last() to route.lon.last()))
+            }
         }
     }
 
-    private fun whenLaidOut(block: () -> Unit) {
-        if (view.isLayoutOccurred) block() else view.addOnFirstLayoutListener { _, _, _, _, _ -> block() }
+    fun destroy() {
+        pause()
+        stop()
+        if (!destroyed) {
+            destroyed = true
+            style = null
+            map = null
+            view.onDestroy()
+        }
+    }
+
+    private fun start() {
+        if (!started && !destroyed) { started = true; view.onStart() }
+    }
+
+    private fun resume() {
+        if (!resumed && !destroyed) { resumed = true; view.onResume() }
+    }
+
+    private fun pause() {
+        if (resumed) { resumed = false; view.onPause() }
+    }
+
+    private fun stop() {
+        if (started) { started = false; view.onStop() }
+    }
+
+    private fun whenReady(action: (MapLibreMap) -> Unit) {
+        val ready = map
+        if (ready != null && style != null) action(ready) else pendingCamera = { map?.let(action) }
+    }
+
+    private fun draw() {
+        val loaded = style ?: return
+        val track = route
+        loaded.getSourceAs<GeoJsonSource>(ROUTE)?.setGeoJson(
+            if (track == null) NOTHING
+            else FeatureCollection.fromFeature(
+                Feature.fromGeometry(LineString.fromLngLats(List(track.lat.size) { Point.fromLngLat(track.lon[it], track.lat[it]) })),
+            ),
+        )
+        loaded.getSourceAs<GeoJsonSource>(PIN)?.setGeoJson(
+            if (track == null) NOTHING
+            else FeatureCollection.fromFeature(Feature.fromGeometry(Point.fromLngLat(track.lon.last(), track.lat.last()))),
+        )
+        val here = position
+        loaded.getSourceAs<GeoJsonSource>(ME)?.setGeoJson(
+            if (here == null) NOTHING else FeatureCollection.fromFeature(Feature.fromGeometry(Point.fromLngLat(here.second, here.first))),
+        )
+    }
+
+    private companion object {
+        const val ROUTE = "trip-route"
+        const val PIN = "trip-pin"
+        const val ME = "trip-me"
+        val NOTHING: FeatureCollection = FeatureCollection.fromFeatures(emptyList<Feature>())
     }
 }
-
-/**
- * Night palette for the standard (light-only) OSM tiles: invert the brightness, then turn the hue half a
- * circle so colours come back to where they were – sea stays blue, woods green – just dark. A plain invert
- * gives brown sea and purple land.
- */
-private val NIGHT = ColorMatrixColorFilter(
-    floatArrayOf(
-        0.574f, -1.43f, -0.144f, 0f, 255f,
-        -0.426f, -0.43f, -0.144f, 0f, 255f,
-        -0.426f, -1.43f, 0.856f, 0f, 255f,
-        0f, 0f, 0f, 1f, 0f,
-    ),
-)
-
-/**
- * openstreetmap.org's own tiles label everything in the local script only, which is unreadable abroad
- * (Japan!). The German OSM community's server draws the same style with a Latin-script name next to the
- * local one. (A few names come out in German spelling – "Tokio" – which is a fair price for no API key.)
- */
-private val LATIN_LABELS = XYTileSource(
-    "OSM-DE", 0, 19, 256, ".png",
-    arrayOf("https://tile.openstreetmap.de/"),
-    "© OpenStreetMap contributors",
-)

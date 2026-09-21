@@ -1,3 +1,1 @@
-# osmdroid looks a few of its own classes up by name (tile writers, archive providers).
--keep class org.osmdroid.** { *; }
--dontwarn org.osmdroid.**
+# No app-specific rules needed: MapLibre ships its own, nothing else uses reflection.
