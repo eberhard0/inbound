@@ -41,7 +41,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.CustomZoomButtonsController
@@ -168,7 +168,7 @@ private class TripMap(context: Context) {
             osmdroidTileCache = File(context.cacheDir, "osmdroid/tiles")
         }
         view = MapView(context).apply {
-            setTileSource(TileSourceFactory.MAPNIK)
+            setTileSource(LATIN_LABELS)
             setMultiTouchControls(true)
             zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
             isTilesScaledToDpi = true
@@ -254,4 +254,15 @@ private val NIGHT = ColorMatrixColorFilter(
         -0.426f, -1.43f, 0.856f, 0f, 255f,
         0f, 0f, 0f, 1f, 0f,
     ),
+)
+
+/**
+ * openstreetmap.org's own tiles label everything in the local script only, which is unreadable abroad
+ * (Japan!). The German OSM community's server draws the same style with a Latin-script name next to the
+ * local one. (A few names come out in German spelling – "Tokio" – which is a fair price for no API key.)
+ */
+private val LATIN_LABELS = XYTileSource(
+    "OSM-DE", 0, 19, 256, ".png",
+    arrayOf("https://tile.openstreetmap.de/"),
+    "© OpenStreetMap contributors",
 )
