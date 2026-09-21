@@ -47,20 +47,37 @@ object RailRouter {
         }
     }
 
+    /** The quickest track, plus the one ordinary trains take where the quickest is a high-speed line. */
+    class Planned(val fast: RailRoute, val conventional: RailRoute?)
+
     /** Never fails: the worst case is the padded straight line. */
-    fun route(fromLat: Double, fromLon: Double, to: Destination): RailRoute =
-        runCatching { openRailRouting(fromLat, fromLon, to) }.getOrNull()
+    fun route(fromLat: Double, fromLon: Double, to: Destination): Planned {
+        val fast = runCatching { openRailRouting(fromLat, fromLon, to, avoidHighSpeed = false) }.getOrNull()
             ?: runCatching { bRouter(fromLat, fromLon, to) }.getOrNull()
             ?: RailRoute.straight(fromLat, fromLon, to)
+        if (fast.highSpeedShare() <= 0.1) return Planned(fast, null)
 
-    private fun openRailRouting(fromLat: Double, fromLon: Double, to: Destination): RailRoute {
-        val url = String.format(
-            Locale.US,
-            "https://routing.openrailrouting.org/route?point=%.6f,%.6f&point=%.6f,%.6f" +
-                "&profile=all_tracks&points_encoded=false&instructions=false&details=time",
-            fromLat, fromLon, to.lat, to.lon,
-        )
-        val path = JSONObject(get(url)).getJSONArray("paths").getJSONObject(0)
+        val classic = runCatching { openRailRouting(fromLat, fromLon, to, avoidHighSpeed = true) }.getOrNull()
+        // A huge detour means there is no sensible classic line (e.g. the destination is a high-speed-only
+        // station); slower trains are then estimated on the fast track instead.
+        return Planned(fast, classic?.takeIf { it.totalM < fast.totalM * MAX_CLASSIC_DETOUR })
+    }
+
+    private fun openRailRouting(fromLat: Double, fromLon: Double, to: Destination, avoidHighSpeed: Boolean): RailRoute {
+        val request = JSONObject()
+            .put("points", JSONArray().put(JSONArray().put(fromLon).put(fromLat)).put(JSONArray().put(to.lon).put(to.lat)))
+            .put("profile", "all_tracks")
+            .put("points_encoded", false)
+            .put("instructions", false)
+            .put("details", JSONArray().put("time"))
+        if (avoidHighSpeed) {
+            request.put("ch.disable", true).put(
+                "custom_model",
+                JSONObject().put("priority", JSONArray().put(JSONObject().put("if", "max_speed > 200").put("multiply_by", "0.05"))),
+            )
+        }
+        val path = JSONObject(post("https://routing.openrailrouting.org/route", request.toString()))
+            .getJSONArray("paths").getJSONObject(0)
         val (lat, lon) = coordinates(path.getJSONObject("points").getJSONArray("coordinates"))
         val cumDist = Geo.cumulative(lat, lon)
 
@@ -109,13 +126,24 @@ object RailRouter {
 
     private fun uniformTimes(cumDist: DoubleArray) = DoubleArray(cumDist.size) { cumDist[it] / RailRoute.DEFAULT_LINE_SPEED }
 
-    private fun get(url: String): String {
+    private const val MAX_CLASSIC_DETOUR = 1.5
+
+    private fun get(url: String) = request(url, null)
+
+    private fun post(url: String, json: String) = request(url, json)
+
+    private fun request(url: String, body: String?): String {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+            }
             connection.setRequestProperty("User-Agent", USER_AGENT)
             connection.setRequestProperty("Accept-Language", Locale.getDefault().toLanguageTag())
             connection.connectTimeout = 10_000
             connection.readTimeout = 20_000
+            if (body != null) connection.outputStream.use { it.write(body.toByteArray()) }
             if (connection.responseCode !in 200..299) throw IOException("HTTP ${connection.responseCode}")
             return connection.inputStream.bufferedReader().use { it.readText() }
         } finally {

@@ -68,8 +68,11 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
 
     var journey by mutableStateOf(store.load())
         private set
-    /** Null until the first fix after a destination was set. */
-    var progress by mutableStateOf<Progress?>(null)
+    /** One entry per train type; empty until the first fix after a destination was set. */
+    var progress by mutableStateOf<Map<TrainType, Progress>>(emptyMap())
+        private set
+    /** The train the user says they're on: its estimate is the big one, and its track is the one we follow. */
+    var trainType by mutableStateOf(store.trainType)
         private set
     var results by mutableStateOf<List<Destination>>(emptyList())
         private set
@@ -136,6 +139,12 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         }
     }
 
+    fun selectTrain(type: TrainType) {
+        trainType = type
+        store.trainType = type
+        offTrackSinceMs = 0L
+    }
+
     fun clearSearch() {
         searchJob?.cancel()
         results = emptyList()
@@ -153,8 +162,8 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         recent = store.recent
         results = emptyList()
         notice = null
-        progress = null
-        plan(destination, here, carry = null, initialM = null, keepOldOnFailure = false)
+        progress = emptyMap()
+        plan(destination, here, carryOver = false, keepOldOnFailure = false)
         return true
     }
 
@@ -162,43 +171,50 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
     fun retryRoute() {
         val current = journey ?: return
         val here = currentPosition() ?: return
-        plan(current.destination, here, progress, current.initialM, keepOldOnFailure = true)
+        plan(current.destination, here, carryOver = true, keepOldOnFailure = true)
     }
 
     fun endJourney() {
         routeJob?.cancel()
         routing = false
         journey = null
-        progress = null
+        progress = emptyMap()
         notice = null
         store.save(null)
     }
 
-    private fun plan(destination: Destination, from: Location, carry: Progress?, initialM: Double?, keepOldOnFailure: Boolean) {
+    private fun plan(destination: Destination, from: Location, carryOver: Boolean, keepOldOnFailure: Boolean) {
         routeJob?.cancel()
         routeJob = viewModelScope.launch {
             val me = coroutineContext[Job]
             routing = true
             try {
-                val route = withContext(Dispatchers.IO) { RailRouter.route(from.latitude, from.longitude, destination) }
+                val planned = withContext(Dispatchers.IO) { RailRouter.route(from.latitude, from.longitude, destination) }
                 val old = journey
-                if (keepOldOnFailure && route.source == RouteSource.STRAIGHT && old != null) {
+                if (keepOldOnFailure && planned.fast.source == RouteSource.STRAIGHT && old != null) {
                     // A track that may be the wrong one still beats swapping it for a straight line.
                     return@launch
                 }
                 // What the ride has taught us so far stays valid on the new track; only the clock restarts.
-                val clockRunning = carry != null && old != null && old.clockStartMs != 0L
-                val planned = Journey(
+                val before = if (carryOver) old else null
+                val learned = if (before != null) progress else emptyMap()
+                val clockRunning = before != null && before.clockStartMs != 0L
+                val fresh = Journey(
                     destination = destination,
-                    route = route,
-                    initialM = initialM ?: route.totalM,
+                    legs = Journey.legs(planned.fast, planned.conventional).map { (type, route) ->
+                        Leg(
+                            type = type,
+                            route = route,
+                            initialM = before?.legs?.firstOrNull { it.type == type }?.initialM ?: route.totalM,
+                            clockStartFfS = if (clockRunning) route.totalFfS else 0.0,
+                            carriedElapsedS = learned[type]?.elapsedS ?: 0.0,
+                            carriedFfS = learned[type]?.coveredFfS ?: 0.0,
+                        )
+                    },
                     clockStartMs = if (clockRunning) System.currentTimeMillis() else 0L,
-                    clockStartFfS = if (clockRunning) route.totalFfS else 0.0,
-                    carriedElapsedS = carry?.elapsedS ?: 0.0,
-                    carriedFfS = carry?.coveredFfS ?: 0.0,
                 )
-                journey = planned
-                store.save(planned)
+                journey = fresh
+                store.save(fresh)
                 offTrackSinceMs = 0L
                 (last ?: from).let(::updateJourney)
             } finally {
@@ -217,25 +233,30 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
     private fun updateJourney(location: Location) {
         var current = journey ?: return
         val now = System.currentTimeMillis()
-        val position = current.route.locate(location.latitude, location.longitude)
+        val positions = current.legs.associate { it.type to it.route.locate(location.latitude, location.longitude) }
 
         // Waiting on the platform must not count as a slow train: the clock starts with the first real movement.
         if (current.clockStartMs == 0L && location.hasSpeed() && location.speed >= CLOCK_START_MPS) {
-            current = current.copy(clockStartMs = now, clockStartFfS = position.remainingFfS)
+            current = current.copy(
+                clockStartMs = now,
+                legs = current.legs.map { it.copy(clockStartFfS = positions.getValue(it.type).remainingFfS) },
+            )
             journey = current
             store.save(current)
         }
 
-        val update = current.progress(position, now)
-        progress = update
+        progress = current.legs.associate { it.type to it.progress(positions.getValue(it.type), now, current.clockStartMs) }
 
-        // Well away from the planned track for a while: we're on a different line, so plan again from here.
+        // Well away from the track of the train we're supposedly on, for a while: it's a different line,
+        // so plan again from here.
+        val followed = current.leg(trainType)
+        val update = progress.getValue(followed.type)
         val accurate = !location.hasAccuracy() || location.accuracy <= 100f
-        if (current.route.source != RouteSource.STRAIGHT && accurate && !update.arrived && position.offTrackM > OFF_TRACK_M) {
+        if (followed.route.source != RouteSource.STRAIGHT && accurate && !update.arrived && update.offTrackM > OFF_TRACK_M) {
             if (offTrackSinceMs == 0L) offTrackSinceMs = now
             if (!routing && now - offTrackSinceMs > OFF_TRACK_PATIENCE_MS && now - lastRerouteMs > REROUTE_INTERVAL_MS) {
                 lastRerouteMs = now
-                plan(current.destination, location, update, current.initialM, keepOldOnFailure = true)
+                plan(current.destination, location, carryOver = true, keepOldOnFailure = true)
             }
         } else {
             offTrackSinceMs = 0L

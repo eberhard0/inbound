@@ -323,7 +323,6 @@ private fun Speedometer(viewModel: SpeedViewModel) {
 @Composable
 private fun EtaCard(viewModel: SpeedViewModel, mph: Boolean, tick: Long, onPick: () -> Unit, modifier: Modifier = Modifier) {
     val journey = viewModel.journey
-    val progress = viewModel.progress
     Column(
         modifier
             .clip(RoundedCornerShape(14.dp))
@@ -350,17 +349,21 @@ private fun EtaCard(viewModel: SpeedViewModel, mph: Boolean, tick: Long, onPick:
                 TextButton(onClick = onPick) { Text("Change") }
                 TextButton(onClick = viewModel::endJourney) { Text("End") }
             }
+            val followed = journey.leg(viewModel.trainType)
+            val progress = viewModel.progress[followed.type]
             if (progress == null) {
                 Text(if (viewModel.routing) "Finding the track…" else "Waiting for a GPS fix…", color = Muted, fontSize = 15.sp)
             } else {
-                EtaFigures(journey, progress, viewModel.routing, mph, tick, viewModel::retryRoute)
+                EtaFigures(followed, progress, viewModel.routing, mph, tick, viewModel::retryRoute)
+                Spacer(Modifier.height(8.dp))
+                TrainRows(journey, viewModel.progress, followed.type, tick, viewModel::selectTrain)
             }
         }
     }
 }
 
 @Composable
-private fun EtaFigures(journey: Journey, progress: Progress, routing: Boolean, mph: Boolean, tick: Long, onRetry: () -> Unit) {
+private fun EtaFigures(leg: Leg, progress: Progress, routing: Boolean, mph: Boolean, tick: Long, onRetry: () -> Unit) {
     val context = LocalContext.current
     val nowMs = remember(tick) { System.currentTimeMillis() }
     val secondsLeft = ((progress.arrivalMs - nowMs) / 1000).coerceAtLeast(0L)
@@ -398,12 +401,50 @@ private fun EtaFigures(journey: Journey, progress: Progress, routing: Boolean, m
     }
     when {
         routing -> Text("Re-planning the track…", color = Warning, fontSize = 13.sp)
-        journey.route.source == RouteSource.STRAIGHT -> Row(verticalAlignment = Alignment.CenterVertically) {
+        leg.route.source == RouteSource.STRAIGHT -> Row(verticalAlignment = Alignment.CenterVertically) {
             Text("No rail line found – straight-line estimate", color = Warning, fontSize = 13.sp, modifier = Modifier.weight(1f))
             TextButton(onClick = onRetry) { Text("Retry") }
         }
         progress.offTrackM > SpeedViewModel.OFF_TRACK_M && !progress.arrived ->
             Text("Off the planned track – will re-plan from here", color = Warning, fontSize = 13.sp)
+    }
+}
+
+/**
+ * Every kind of train that could be running on this route, side by side. Tapping one says "that's mine":
+ * it becomes the big figure above and the track the app follows.
+ */
+@Composable
+private fun TrainRows(journey: Journey, progress: Map<TrainType, Progress>, selected: TrainType, tick: Long, onSelect: (TrainType) -> Unit) {
+    val context = LocalContext.current
+    val nowMs = remember(tick) { System.currentTimeMillis() }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        journey.legs.forEach { leg ->
+            val p = progress[leg.type]
+            if (p != null) {
+                val mine = leg.type == selected
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (mine) Accent.copy(alpha = 0.16f) else Track)
+                        .clickable { onSelect(leg.type) }
+                        .padding(8.dp),
+                ) {
+                    Text(leg.type.label.uppercase(), color = if (mine) Accent else Muted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text(
+                        if (p.arrived) "Arrived" else formatEtaShort(((p.arrivalMs - nowMs) / 1000).coerceAtLeast(0L).toDouble()),
+                        fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                    )
+                    if (!p.arrived) {
+                        Text(
+                            DateFormat.getTimeFormat(context).format(Date(maxOf(p.arrivalMs, nowMs))),
+                            color = Muted, fontSize = 12.sp, maxLines = 1,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -619,6 +660,16 @@ private fun formatEta(seconds: Double): String {
         minutes < 1 -> "< 1 min"
         minutes < 60 -> "$minutes min"
         else -> "${minutes / 60} h ${minutes % 60} min"
+    }
+}
+
+/** Same, squeezed for the narrow per-train cells. */
+private fun formatEtaShort(seconds: Double): String {
+    val minutes = (seconds / 60).roundToInt()
+    return when {
+        minutes < 1 -> "< 1 min"
+        minutes < 60 -> "$minutes min"
+        else -> "${minutes / 60}h ${minutes % 60}m"
     }
 }
 

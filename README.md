@@ -15,6 +15,19 @@ with the time to go measured **along the actual railway line**, not as the crow 
    and is pulled towards what this ride really shows: seconds spent per free-flow second covered. Waiting on
    the platform doesn't count – the clock starts with the first movement.
 
+### Train types, side by side
+
+The card shows an estimate for every kind of train that could be running on the route, all at once; tap the
+one you're on and it becomes the big figure (and the track the app follows).
+
+| Type | Runs at most | Starting slowdown | Track |
+|---|---|---|---|
+| High-speed | 320 km/h | 1.15 | quickest track – only shown where >10 % of it is faster than 200 km/h |
+| Express | 160 km/h | 1.25 | the line that keeps off high-speed track, if there is a sensible one |
+| Local | 120 km/h | 1.5 | same as Express |
+
+So nothing depends on the country: whether "High-speed" appears is read off the actual track.
+
 Because that only needs two positions, GPS runs **only while the app is on screen**. Close it, reopen it
 half an hour later, and one fix is enough for a fresh estimate. The countdown keeps ticking through tunnels.
 
