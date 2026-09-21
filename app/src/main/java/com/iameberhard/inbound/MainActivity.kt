@@ -127,6 +127,7 @@ private fun App(viewModel: SpeedViewModel) {
     var granted by remember { mutableStateOf(hasFineLocation(context)) }
     var denied by remember { mutableStateOf(false) }
     var askedOnce by rememberSaveable { mutableStateOf(false) }
+    var showMap by rememberSaveable { mutableStateOf(false) }
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -167,7 +168,7 @@ private fun App(viewModel: SpeedViewModel) {
                     viewModel.start()
                     onStopOrDispose { viewModel.stop() }
                 }
-                Speedometer(viewModel)
+                Speedometer(viewModel, onMap = { showMap = true })
             } else {
                 PermissionScreen(
                     denied = denied,
@@ -183,6 +184,8 @@ private fun App(viewModel: SpeedViewModel) {
                 )
             }
         }
+        // Over the readout, edge to edge; the GPS feed started above keeps running underneath.
+        if (showMap && granted) MapScreen(viewModel, onDismiss = { showMap = false })
     }
 }
 
@@ -219,7 +222,7 @@ private fun PermissionScreen(denied: Boolean, onAsk: () -> Unit, onOpenSettings:
 }
 
 @Composable
-private fun Speedometer(viewModel: SpeedViewModel) {
+private fun Speedometer(viewModel: SpeedViewModel, onMap: () -> Unit) {
     val context = LocalContext.current
     // Ticks once a second so a lost signal is noticed even though no new fix arrives to tell us.
     val now by produceState(SystemClock.elapsedRealtime()) {
@@ -230,7 +233,6 @@ private fun Speedometer(viewModel: SpeedViewModel) {
     }
 
     var picking by rememberSaveable { mutableStateOf(false) }
-    var showMap by rememberSaveable { mutableStateOf(false) }
     val pick = {
         viewModel.clearSearch()
         picking = true
@@ -302,14 +304,13 @@ private fun Speedometer(viewModel: SpeedViewModel) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 UnitToggle(mph = mph, onToggle = viewModel::toggleUnit)
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { showMap = true }) { Text("Map") }
+                TextButton(onClick = onMap) { Text("Map") }
                 TextButton(onClick = viewModel::resetTrip) { Text("Reset trip") }
             }
         }
     }
 
     if (picking) DestinationDialog(viewModel, onDismiss = { picking = false })
-    if (showMap) MapDialog(viewModel, mph, now, onDismiss = { showMap = false })
 }
 
 /**

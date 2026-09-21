@@ -1,8 +1,10 @@
 package com.iameberhard.inbound
 
 import android.content.Context
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -19,6 +22,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,8 +37,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
@@ -42,16 +47,25 @@ import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
-import org.osmdroid.views.overlay.TilesOverlay
 import java.io.File
 
 /**
  * Full-screen map: where the phone is right now, the planned track, the destination, and what is left.
- * It lives inside the activity, so the same on-screen-only GPS feed keeps it up to date.
+ * It is drawn over the readout inside the activity (a Dialog window gets the edge-to-edge insets wrong and
+ * cuts the bottom buttons off), so the same on-screen-only GPS feed keeps it up to date.
  */
 @Composable
-internal fun MapDialog(viewModel: SpeedViewModel, mph: Boolean, tick: Long, onDismiss: () -> Unit) {
+internal fun MapScreen(viewModel: SpeedViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val mph = viewModel.useMph
+    // Once a second, so the time left keeps counting down between fixes.
+    val tick by produceState(0L) {
+        while (true) {
+            delay(1000)
+            value++
+        }
+    }
+    BackHandler(onBack = onDismiss)
     val journey = viewModel.journey
     val leg = journey?.leg(viewModel.trainType)
     val progress = leg?.let { viewModel.progress[it.type] }
@@ -70,9 +84,10 @@ internal fun MapDialog(viewModel: SpeedViewModel, mph: Boolean, tick: Long, onDi
     // Opening view: the whole remaining journey if there is one, otherwise just where we are.
     LaunchedEffect(Unit) { if (leg != null) map.frameRoute(leg.route, here) else map.centreOn(here) }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView(factory = { map.view }, modifier = Modifier.fillMaxSize())
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(factory = { map.view }, modifier = Modifier.fillMaxSize())
+        // The map runs edge to edge; the controls keep clear of the status bar, cut-out and gesture area.
+        Box(Modifier.fillMaxSize().safeDrawingPadding()) {
 
             Row(
                 Modifier.align(Alignment.TopStart).fillMaxWidth().padding(12.dp),
@@ -155,7 +170,7 @@ private class TripMap(context: Context) {
             isVerticalMapRepetitionEnabled = false
             setScrollableAreaLimitLatitude(MapView.getTileSystem().maxLatitude, MapView.getTileSystem().minLatitude, 0)
             // The app is dark throughout; inverted standard tiles make a decent night map.
-            overlayManager.tilesOverlay.setColorFilter(TilesOverlay.INVERT_COLORS)
+            overlayManager.tilesOverlay.setColorFilter(NIGHT)
             controller.setZoom(5.0)
         }
         val density = context.resources.displayMetrics.density
@@ -167,6 +182,7 @@ private class TripMap(context: Context) {
             setOnClickListener { _, _, _ -> false }
         }
         destination = Marker(view).apply {
+            setIcon(ContextCompat.getDrawable(context, R.drawable.ic_pin))
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
             setInfoWindow(null)
             setOnMarkerClickListener { _, _ -> true }
@@ -219,3 +235,17 @@ private class TripMap(context: Context) {
         if (view.isLayoutOccurred) block() else view.addOnFirstLayoutListener { _, _, _, _, _ -> block() }
     }
 }
+
+/**
+ * Night palette for the standard (light-only) OSM tiles: invert the brightness, then turn the hue half a
+ * circle so colours come back to where they were – sea stays blue, woods green – just dark. A plain invert
+ * gives brown sea and purple land.
+ */
+private val NIGHT = ColorMatrixColorFilter(
+    floatArrayOf(
+        0.574f, -1.43f, -0.144f, 0f, 255f,
+        -0.426f, -0.43f, -0.144f, 0f, 255f,
+        -0.426f, -1.43f, 0.856f, 0f, 255f,
+        0f, 0f, 0f, 1f, 0f,
+    ),
+)
