@@ -65,6 +65,11 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         private set
 
     private val store = JourneyStore(app)
+    private val rideLog = RideLog(app)
+
+    /** Rows in the ride log, so the card can show that it is recording. */
+    var logRows by mutableIntStateOf(rideLog.rows)
+        private set
 
     var journey by mutableStateOf(store.load())
         private set
@@ -94,6 +99,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
     private var pace = store.pace
     private var paceSavedMs = 0L
     private var tooFastCount = 0
+    private var arrivalLogged = false
 
     private var searchJob: Job? = null
     private var routeJob: Job? = null
@@ -152,6 +158,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         if (type == trainType) return
         trainType = type
         store.trainType = type
+        rideLog.event("train type -> ${type.name}")
         offTrackSinceMs = 0L
         // Pace is measured against that train's line speeds, so it starts over.
         resetPace()
@@ -159,6 +166,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
     }
 
     private fun resetPace() {
+        arrivalLogged = false
         pace = Pace()
         store.pace = pace
         tooFastCount = 0
@@ -183,6 +191,8 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         notice = null
         progress = emptyMap()
         resetPace()
+        rideLog.begin(destination, BuildConfig.VERSION_NAME)
+        logRows = rideLog.rows
         plan(destination, here, carryOver = false, keepOldOnFailure = false)
         return true
     }
@@ -194,7 +204,11 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         plan(current.destination, here, carryOver = true, keepOldOnFailure = true)
     }
 
+    /** Saves the ride log to Downloads; returns the file name, or null when there was nothing to save. */
+    fun exportLog(): String? = rideLog.export()
+
     fun endJourney() {
+        rideLog.event("ended by user")
         routeJob?.cancel()
         routing = false
         journey = null
@@ -235,6 +249,10 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
                 )
                 journey = fresh
                 store.save(fresh)
+                rideLog.event(
+                    (if (carryOver) "re-plan" else "plan") + " source=${planned.fast.source} classic=${planned.conventional != null} " +
+                        fresh.legs.joinToString(" ") { "${it.type.name}=${it.route.totalM.toInt()}m/${it.route.totalFfS.toInt()}s" },
+                )
                 offTrackSinceMs = 0L
                 (last ?: from).let(::updateJourney)
             } finally {
@@ -263,6 +281,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
             )
             journey = current
             store.save(current)
+            rideLog.event("clock started")
         }
 
         val followed = current.leg(trainType)
@@ -289,6 +308,16 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
 
         progress = current.legs.associate {
             it.type to it.progress(positions.getValue(it.type), now, current.clockStartMs, if (it.type == followed.type) pace else null)
+        }
+
+        rideLog.fix(
+            location.latitude, location.longitude, speed, if (location.hasAccuracy()) location.accuracy else null,
+            followed.type, onTrack, pace, progress,
+        )
+        logRows = rideLog.rows
+        if (progress.getValue(followed.type).arrived && !arrivalLogged) {
+            arrivalLogged = true
+            rideLog.event("arrived (within ${Leg.ARRIVED_M.toInt()} m)")
         }
 
         // Well away from the track of the train we're supposedly on, for a while: it's a different line,

@@ -60,6 +60,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true // the ride log records which version produced it
     }
 
     packaging {

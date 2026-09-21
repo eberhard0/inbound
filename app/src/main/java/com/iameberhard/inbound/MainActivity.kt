@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.text.format.DateFormat
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -356,6 +357,8 @@ private fun EtaCard(viewModel: SpeedViewModel, mph: Boolean, tick: Long, onPick:
                 TrainRows(journey, viewModel.progress, followed.type, tick, viewModel::selectTrain)
             }
         }
+        // Still reachable after "End", so a finished ride can be exported.
+        if (viewModel.logRows > 0) LogRow(viewModel)
     }
 }
 
@@ -404,6 +407,22 @@ private fun EtaFigures(leg: Leg, progress: Progress, routing: Boolean, mph: Bool
         }
         progress.offTrackM > SpeedViewModel.OFF_TRACK_M && !progress.arrived ->
             Text("Off the planned track – will re-plan from here", color = Warning, fontSize = 13.sp)
+    }
+}
+
+/** Shows that the ride is being recorded, and saves the recording where it can be picked up for tuning. */
+@Composable
+private fun LogRow(viewModel: SpeedViewModel) {
+    val context = LocalContext.current
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Ride log · ${viewModel.logRows} rows", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        TextButton(
+            enabled = viewModel.logRows > 0,
+            onClick = {
+                val name = viewModel.exportLog()
+                Toast.makeText(context, if (name != null) "Saved to Downloads: $name" else "Couldn't save the log", Toast.LENGTH_LONG).show()
+            },
+        ) { Text("Export") }
     }
 }
 
