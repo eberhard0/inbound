@@ -90,6 +90,11 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
     var position by mutableStateOf<Pair<Double, Double>?>(null)
         private set
 
+    /** Running pace of the train being followed; see [Pace]. */
+    private var pace = store.pace
+    private var paceSavedMs = 0L
+    private var tooFastCount = 0
+
     private var searchJob: Job? = null
     private var routeJob: Job? = null
     private var offTrackSinceMs = 0L
@@ -144,9 +149,19 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
     }
 
     fun selectTrain(type: TrainType) {
+        if (type == trainType) return
         trainType = type
         store.trainType = type
         offTrackSinceMs = 0L
+        // Pace is measured against that train's line speeds, so it starts over.
+        resetPace()
+        last?.let(::updateJourney)
+    }
+
+    private fun resetPace() {
+        pace = Pace()
+        store.pace = pace
+        tooFastCount = 0
     }
 
     fun clearSearch() {
@@ -167,6 +182,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         results = emptyList()
         notice = null
         progress = emptyMap()
+        resetPace()
         plan(destination, here, carryOver = false, keepOldOnFailure = false)
         return true
     }
@@ -249,11 +265,34 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
             store.save(current)
         }
 
-        progress = current.legs.associate { it.type to it.progress(positions.getValue(it.type), now, current.clockStartMs) }
+        val followed = current.leg(trainType)
+        val speed = if (location.hasSpeed()) location.speed.toDouble() else 0.0
+
+        // Clearly faster than the chosen kind of train can go: it's a faster kind.
+        if (speed > followed.type.capMps * 1.1) tooFastCount++ else tooFastCount = 0
+        if (tooFastCount >= 10) {
+            val faster = current.legs.sortedBy { it.type.capMps }.firstOrNull { it.type.capMps * 1.1 >= speed }
+                ?: current.legs.maxBy { it.type.capMps }
+            if (faster.type != followed.type) return selectTrain(faster.type)
+            tooFastCount = 0
+        }
+
+        // Cruising on the planned track: compare real speed with the mapped line speed.
+        val onTrack = positions.getValue(followed.type)
+        if (onTrack.lineMps > 0 && onTrack.offTrackM < 200 && speed >= 10 && speed >= 0.6 * onTrack.lineMps) {
+            pace = pace.add(onTrack.lineMps, speed)
+            if (now - paceSavedMs > 30_000) {
+                paceSavedMs = now
+                store.pace = pace
+            }
+        }
+
+        progress = current.legs.associate {
+            it.type to it.progress(positions.getValue(it.type), now, current.clockStartMs, if (it.type == followed.type) pace else null)
+        }
 
         // Well away from the track of the train we're supposedly on, for a while: it's a different line,
         // so plan again from here.
-        val followed = current.leg(trainType)
         val update = progress.getValue(followed.type)
         val accurate = !location.hasAccuracy() || location.accuracy <= 100f
         if (followed.route.source != RouteSource.STRAIGHT && accurate && !update.arrived && update.offTrackM > OFF_TRACK_M) {
@@ -297,6 +336,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         satellites = 0
         satellitesInView = 0
         running = false
+        store.pace = pace
     }
 
     override fun onCleared() = stop()

@@ -16,13 +16,34 @@ data class Destination(
 
 /**
  * The kinds of train the card shows side by side. [capMps] is the most such a train does even where the line
- * allows more; [priorSlowdown] is how much longer than non-stop running it typically takes (stops!) before
- * the ride itself has shown anything; [typicalMps] stands in where the router gives no line speeds.
+ * allows more; [stopOverhead] is the share of extra time stations typically cost it (dwell plus braking and
+ * pulling away) on top of pure running; [typicalMps] stands in where the router gives no line speeds.
  */
-enum class TrainType(val label: String, val capMps: Double, val priorSlowdown: Double, val typicalMps: Double) {
-    HIGH_SPEED("High-speed", 320 / 3.6, 1.15, 200 / 3.6),
-    EXPRESS("Express", 160 / 3.6, 1.25, 110 / 3.6),
-    LOCAL("Local", 120 / 3.6, 1.5, 80 / 3.6),
+enum class TrainType(val label: String, val capMps: Double, val stopOverhead: Double, val typicalMps: Double) {
+    HIGH_SPEED("High-speed", 320 / 3.6, 0.08, 200 / 3.6),
+    EXPRESS("Express", 160 / 3.6, 0.18, 110 / 3.6),
+    LOCAL("Local", 120 / 3.6, 0.40, 80 / 3.6),
+}
+
+/**
+ * How the train really runs compared with the mapped line speed (1.0 = exactly line speed, 0.9 = 10 % quicker
+ * than the map thinks), from GPS samples taken while cruising. [ema] follows the current stretch of line –
+ * mapped speeds are too low on some lines and too high on others – while [mean] covers the whole ride.
+ */
+data class Pace(val ema: Double = 1.0, val sum: Double = 0.0, val count: Int = 0) {
+    val mean get() = if (count > 0) sum / count else 1.0
+
+    fun add(lineMps: Double, gpsMps: Double): Pace {
+        val ratio = (lineMps / gpsMps).coerceIn(MIN_RATIO, MAX_RATIO)
+        // Plain average while warming up, then a memory of about five minutes of samples.
+        val alpha = maxOf(1.0 / (count + 1), 1.0 / 300)
+        return Pace(ema + alpha * (ratio - ema), sum + ratio, count + 1)
+    }
+
+    companion object {
+        const val MIN_RATIO = 0.6
+        const val MAX_RATIO = 1.6
+    }
 }
 
 enum class RouteSource {
@@ -50,14 +71,15 @@ class RailRoute(
     val totalM get() = cumDist.last()
     val totalFfS get() = cumFf.last()
 
-    class Position(val remainingM: Double, val remainingFfS: Double, val offTrackM: Double)
+    /** [lineMps] is the free-flow speed of the stretch of track the fix snapped to (0 = unknown). */
+    class Position(val remainingM: Double, val remainingFfS: Double, val offTrackM: Double, val lineMps: Double)
 
     /** Snaps a GPS fix onto the track and reports what is left from there. */
     fun locate(pLat: Double, pLon: Double): Position {
         if (source == RouteSource.STRAIGHT) {
             // Nothing to snap to; re-measure the padded straight line every time instead.
             val metres = Geo.distance(pLat, pLon, lat.last(), lon.last()) * STRAIGHT_PADDING
-            return Position(metres, metres / straightMps, 0.0)
+            return Position(metres, metres / straightMps, 0.0, 0.0)
         }
         // Flat-earth metres around the fix: exact enough near it, and far segments never win anyway.
         val kx = 111_320.0 * cos(Math.toRadians(pLat))
@@ -83,7 +105,9 @@ class RailRoute(
         }
         val doneM = cumDist[bestI] + bestT * (cumDist[bestI + 1] - cumDist[bestI])
         val doneFf = cumFf[bestI] + bestT * (cumFf[bestI + 1] - cumFf[bestI])
-        return Position(totalM - doneM, totalFfS - doneFf, sqrt(best))
+        val segmentS = cumFf[bestI + 1] - cumFf[bestI]
+        val lineMps = if (segmentS > 0) (cumDist[bestI + 1] - cumDist[bestI]) / segmentS else 0.0
+        return Position(totalM - doneM, totalFfS - doneFf, sqrt(best), lineMps)
     }
 
     /** The same track as run by [type]: never faster than that train goes, whatever the line allows. */
@@ -133,10 +157,13 @@ class RailRoute(
 /**
  * One train type's view of the journey: its track, and what the ride has shown so far.
  *
- * The ETA is "free-flow time still ahead × slowdown". The slowdown starts at the type's prior (trains
- * stop at stations and rarely run at full line speed) and is then pulled towards what this ride actually
- * shows: real seconds spent per free-flow second covered. Only two positions are needed for that, so it
- * keeps working when the app – and with it the GPS – was closed for most of the ride.
+ * ETA = free-flow time still ahead × (running pace + stop overhead).
+ *  - Running pace is measured live ([Pace]) and follows the line the train is on right now.
+ *  - Stop overhead starts at the type's typical share and is pulled – slowly, so that one cluster of stations
+ *    can't swing the whole estimate – towards the time this ride has really lost to stops: real seconds
+ *    spent minus what the free-flow seconds covered should have taken at the measured pace.
+ * The stop part only needs two positions, so it keeps working when the app – and with it the GPS – was
+ * closed for most of the ride. Only the train the user is on learns; the other rows are "what if" figures.
  */
 data class Leg(
     val type: TrainType,
@@ -149,20 +176,21 @@ data class Leg(
     val carriedElapsedS: Double = 0.0,
     val carriedFfS: Double = 0.0,
 ) {
-    fun progress(position: RailRoute.Position, nowMs: Long, clockStartMs: Long): Progress {
+    fun progress(position: RailRoute.Position, nowMs: Long, clockStartMs: Long, pace: Pace?): Progress {
         var elapsed = carriedElapsedS
         var covered = carriedFfS
         if (clockStartMs != 0L) {
             elapsed += (nowMs - clockStartMs).coerceAtLeast(0L) / 1000.0
             covered += (clockStartFfS - position.remainingFfS).coerceAtLeast(0.0)
         }
-        val slowdown = ((type.priorSlowdown * PRIOR_WEIGHT_S + elapsed) / (PRIOR_WEIGHT_S + covered))
-            .coerceIn(MIN_SLOWDOWN, MAX_SLOWDOWN)
+        val lostToStops = (elapsed - (pace?.mean ?: 1.0) * covered).coerceAtLeast(0.0)
+        val stops = if (pace == null) type.stopOverhead else (type.stopOverhead * PRIOR_WEIGHT_S + lostToStops) / (PRIOR_WEIGHT_S + covered)
+        val slowdown = ((pace?.ema ?: 1.0) + stops).coerceIn(MIN_SLOWDOWN, MAX_SLOWDOWN)
         val arrived = position.remainingM < ARRIVED_M
         val eta = if (arrived) 0.0 else position.remainingFfS * slowdown
         return Progress(
             remainingM = position.remainingM,
-            bestCaseS = if (arrived) 0.0 else position.remainingFfS,
+            bestCaseS = if (arrived) 0.0 else position.remainingFfS * minOf(1.0, pace?.ema ?: 1.0),
             arrivalMs = nowMs + (eta * 1000).toLong(),
             fraction = if (initialM > 0) (1 - position.remainingM / initialM).coerceIn(0.0, 1.0).toFloat() else 0f,
             offTrackM = position.offTrackM,
@@ -174,7 +202,7 @@ data class Leg(
 
     companion object {
         /** The prior counts as much as this many seconds of observed free-flow running. */
-        const val PRIOR_WEIGHT_S = 600.0
+        const val PRIOR_WEIGHT_S = 3600.0
         /** Below 1: the map's line speeds are sometimes lower than what trains really do there. */
         const val MIN_SLOWDOWN = 0.7
         const val MAX_SLOWDOWN = 4.0

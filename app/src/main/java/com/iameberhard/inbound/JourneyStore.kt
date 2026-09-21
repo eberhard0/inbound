@@ -91,6 +91,15 @@ class JourneyStore(context: Context) {
         get() = runCatching { TrainType.valueOf(prefs.getString(KEY_TYPE, null)!!) }.getOrDefault(TrainType.EXPRESS)
         set(value) = prefs.edit().putString(KEY_TYPE, value.name).apply()
 
+    /** Measured running pace of the ride in progress; tiny and updated often, hence not in the journey file. */
+    var pace: Pace
+        get() = Pace(
+            prefs.getFloat("paceEma", 1f).toDouble(), prefs.getFloat("paceSum", 0f).toDouble(), prefs.getInt("paceCount", 0),
+        )
+        set(value) = prefs.edit()
+            .putFloat("paceEma", value.ema.toFloat()).putFloat("paceSum", value.sum.toFloat()).putInt("paceCount", value.count)
+            .apply()
+
     private fun Destination.toJson() = JSONObject()
         .put("name", name).put("detail", detail).put("lat", lat).put("lon", lon).put("station", station)
 
