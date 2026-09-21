@@ -47,34 +47,75 @@ object RailRouter {
         }
     }
 
-    /** The quickest track, plus the one ordinary trains take where the quickest is a high-speed line. */
-    class Planned(val fast: RailRoute, val conventional: RailRoute?)
+    /**
+     * The quickest track, plus the one ordinary trains take where the quickest is a high-speed line.
+     * [note] says how the fast track was found, for the ride log.
+     */
+    class Planned(val fast: RailRoute, val conventional: RailRoute?, val note: String)
+
+    private enum class Tracks { ANY, HIGH_SPEED_NETWORK, NO_HIGH_SPEED }
 
     /** Never fails: the worst case is the padded straight line. */
     fun route(fromLat: Double, fromLon: Double, to: Destination): Planned {
-        val fast = runCatching { openRailRouting(fromLat, fromLon, to, avoidHighSpeed = false) }.getOrNull()
+        val plain = runCatching { openRailRouting(fromLat, fromLon, to.lat, to.lon, Tracks.ANY) }.getOrNull()
             ?: runCatching { bRouter(fromLat, fromLon, to) }.getOrNull()
             ?: RailRoute.straight(fromLat, fromLon, to)
-        if (fast.highSpeedShare() <= 0.1) return Planned(fast, null)
+        if (plain.highSpeedShare() <= 0.1) return Planned(plain, null, "plain ${plain.source}")
 
-        val classic = runCatching { openRailRouting(fromLat, fromLon, to, avoidHighSpeed = true) }.getOrNull()
+        // A station's pin often sits nearer to some other track than to its high-speed platforms (Tokyo: the
+        // conventional lines and a subway), and the router then drags the whole route onto that network.
+        // High-speed trains stay on standard-gauge mainline track, so plan on that alone – and if the pin itself
+        // doesn't connect, feel around it for the platforms.
+        var note = "plain"
+        var fast = plain
+        for ((label, lat, lon) in around(to)) {
+            val dedicated = runCatching { openRailRouting(fromLat, fromLon, lat, lon, Tracks.HIGH_SPEED_NETWORK) }.getOrNull() ?: continue
+            if (dedicated.totalFfS <= plain.totalFfS * 1.02) {
+                fast = dedicated
+                note = "high-speed network via $label"
+            }
+            break
+        }
+
+        val classic = runCatching { openRailRouting(fromLat, fromLon, to.lat, to.lon, Tracks.NO_HIGH_SPEED) }.getOrNull()
         // A huge detour means there is no sensible classic line (e.g. the destination is a high-speed-only
         // station); slower trains are then estimated on the fast track instead.
-        return Planned(fast, classic?.takeIf { it.totalM < fast.totalM * MAX_CLASSIC_DETOUR })
+        return Planned(fast, classic?.takeIf { it.totalM < fast.totalM * MAX_CLASSIC_DETOUR }, note)
     }
 
-    private fun openRailRouting(fromLat: Double, fromLon: Double, to: Destination, avoidHighSpeed: Boolean): RailRoute {
+    /** The pin itself, then eight compass points 200 m and 400 m out. */
+    private fun around(to: Destination): List<Triple<String, Double, Double>> {
+        val points = mutableListOf(Triple("pin", to.lat, to.lon))
+        for (radius in listOf(200, 400)) {
+            for ((i, compass) in listOf("E", "W", "N", "S", "NE", "SW", "NW", "SE").withIndex()) {
+                val bearing = Math.toRadians(listOf(90.0, 270.0, 0.0, 180.0, 45.0, 225.0, 315.0, 135.0)[i])
+                points += Triple(
+                    "$radius m $compass",
+                    to.lat + radius * Math.cos(bearing) / 111_320.0,
+                    to.lon + radius * Math.sin(bearing) / (111_320.0 * Math.cos(Math.toRadians(to.lat))),
+                )
+            }
+        }
+        return points
+    }
+
+    private fun openRailRouting(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, tracks: Tracks): RailRoute {
         val request = JSONObject()
-            .put("points", JSONArray().put(JSONArray().put(fromLon).put(fromLat)).put(JSONArray().put(to.lon).put(to.lat)))
+            .put("points", JSONArray().put(JSONArray().put(fromLon).put(fromLat)).put(JSONArray().put(toLon).put(toLat)))
             .put("profile", "all_tracks")
             .put("points_encoded", false)
             .put("instructions", false)
             .put("details", JSONArray().put("time"))
-        if (avoidHighSpeed) {
-            request.put("ch.disable", true).put(
-                "custom_model",
-                JSONObject().put("priority", JSONArray().put(JSONObject().put("if", "max_speed > 200").put("multiply_by", "0.05"))),
-            )
+        val rules = when (tracks) {
+            Tracks.ANY -> emptyList()
+            // Mainline only, and no track that is tagged with a non-standard gauge (untagged is fine).
+            Tracks.HIGH_SPEED_NETWORK -> listOf("railway_class != RAIL" to "0", "gauge > 0 && gauge < 1400" to "0", "gauge > 1500" to "0")
+            Tracks.NO_HIGH_SPEED -> listOf("max_speed > 200" to "0.05")
+        }
+        if (rules.isNotEmpty()) {
+            val priority = JSONArray()
+            for ((condition, factor) in rules) priority.put(JSONObject().put("if", condition).put("multiply_by", factor))
+            request.put("ch.disable", true).put("custom_model", JSONObject().put("priority", priority))
         }
         val path = JSONObject(post("https://routing.openrailrouting.org/route", request.toString()))
             .getJSONArray("paths").getJSONObject(0)

@@ -250,7 +250,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
                 journey = fresh
                 store.save(fresh)
                 rideLog.event(
-                    (if (carryOver) "re-plan" else "plan") + " source=${planned.fast.source} classic=${planned.conventional != null} " +
+                    (if (carryOver) "re-plan" else "plan") + " [${planned.note}] source=${planned.fast.source} classic=${planned.conventional != null} " +
                         fresh.legs.joinToString(" ") { "${it.type.name}=${it.route.totalM.toInt()}m/${it.route.totalFfS.toInt()}s" },
                 )
                 offTrackSinceMs = 0L
@@ -326,7 +326,8 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
         val accurate = !location.hasAccuracy() || location.accuracy <= 100f
         if (followed.route.source != RouteSource.STRAIGHT && accurate && !update.arrived && update.offTrackM > OFF_TRACK_M) {
             if (offTrackSinceMs == 0L) offTrackSinceMs = now
-            if (!routing && now - offTrackSinceMs > OFF_TRACK_PATIENCE_MS && now - lastRerouteMs > REROUTE_INTERVAL_MS) {
+            if (!routing && now - offTrackSinceMs >= OFF_TRACK_PATIENCE_MS && now - lastRerouteMs > REROUTE_INTERVAL_MS) {
+                rideLog.event("off track by ${update.offTrackM.toInt()} m -> re-plan")
                 lastRerouteMs = now
                 plan(current.destination, location, carryOver = true, keepOldOnFailure = true)
             }
@@ -443,7 +444,8 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
 
         const val CLOCK_START_MPS = 3f
         const val OFF_TRACK_M = 750.0
-        const val OFF_TRACK_PATIENCE_MS = 20_000L
+        /** Short: the app is often only glanced at, and an accurate fix 750 m off the track is no fluke. */
+        const val OFF_TRACK_PATIENCE_MS = 3_000L
         const val REROUTE_INTERVAL_MS = 90_000L
     }
 }
