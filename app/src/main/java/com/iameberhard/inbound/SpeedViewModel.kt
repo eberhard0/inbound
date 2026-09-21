@@ -86,6 +86,10 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
     var notice by mutableStateOf<String?>(null)
         private set
 
+    /** Latest fix as (latitude, longitude), for the map. */
+    var position by mutableStateOf<Pair<Double, Double>?>(null)
+        private set
+
     private var searchJob: Job? = null
     private var routeJob: Job? = null
     private var offTrackSinceMs = 0L
@@ -346,6 +350,7 @@ class SpeedViewModel(app: Application) : AndroidViewModel(app), LocationListener
             distanceM = distance,
             movingMs = moving,
         )
+        position = location.latitude to location.longitude
         updateJourney(location)
     }
 

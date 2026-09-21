@@ -84,11 +84,11 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private val Accent = Color(0xFF3DDC97)
-private val Track = Color(0xFF1C232B)
-private val Card = Color(0xFF12171D)
-private val Muted = Color(0xFF8A96A3)
-private val Warning = Color(0xFFFFB454)
+internal val Accent = Color(0xFF3DDC97)
+internal val Track = Color(0xFF1C232B)
+internal val Card = Color(0xFF12171D)
+internal val Muted = Color(0xFF8A96A3)
+internal val Warning = Color(0xFFFFB454)
 
 private const val MPS_TO_KMH = 3.6f
 private const val MPS_TO_MPH = 2.236936f
@@ -230,6 +230,7 @@ private fun Speedometer(viewModel: SpeedViewModel) {
     }
 
     var picking by rememberSaveable { mutableStateOf(false) }
+    var showMap by rememberSaveable { mutableStateOf(false) }
     val pick = {
         viewModel.clearSearch()
         picking = true
@@ -301,12 +302,14 @@ private fun Speedometer(viewModel: SpeedViewModel) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 UnitToggle(mph = mph, onToggle = viewModel::toggleUnit)
                 Spacer(Modifier.weight(1f))
+                TextButton(onClick = { showMap = true }) { Text("Map") }
                 TextButton(onClick = viewModel::resetTrip) { Text("Reset trip") }
             }
         }
     }
 
     if (picking) DestinationDialog(viewModel, onDismiss = { picking = false })
+    if (showMap) MapDialog(viewModel, mph, now, onDismiss = { showMap = false })
 }
 
 /**
@@ -629,7 +632,7 @@ private fun UnitToggle(mph: Boolean, onToggle: () -> Unit) {
     }
 }
 
-private fun formatEta(seconds: Double): String {
+internal fun formatEta(seconds: Double): String {
     val minutes = (seconds / 60).roundToInt()
     return when {
         minutes < 1 -> "< 1 min"
@@ -648,7 +651,7 @@ private fun formatEtaShort(seconds: Double): String {
     }
 }
 
-private fun formatDistance(metres: Double, mph: Boolean): String {
+internal fun formatDistance(metres: Double, mph: Boolean): String {
     val value = if (mph) metres / METERS_PER_MILE else metres / 1000.0
     return String.format(Locale.getDefault(), if (value < 100) "%.1f %s" else "%.0f %s", value, if (mph) "mi" else "km")
 }
