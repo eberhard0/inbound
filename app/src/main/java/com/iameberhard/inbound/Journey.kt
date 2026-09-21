@@ -157,7 +157,7 @@ data class Leg(
             covered += (clockStartFfS - position.remainingFfS).coerceAtLeast(0.0)
         }
         val slowdown = ((type.priorSlowdown * PRIOR_WEIGHT_S + elapsed) / (PRIOR_WEIGHT_S + covered))
-            .coerceIn(1.0, MAX_SLOWDOWN)
+            .coerceIn(MIN_SLOWDOWN, MAX_SLOWDOWN)
         val arrived = position.remainingM < ARRIVED_M
         val eta = if (arrived) 0.0 else position.remainingFfS * slowdown
         return Progress(
@@ -175,6 +175,8 @@ data class Leg(
     companion object {
         /** The prior counts as much as this many seconds of observed free-flow running. */
         const val PRIOR_WEIGHT_S = 600.0
+        /** Below 1: the map's line speeds are sometimes lower than what trains really do there. */
+        const val MIN_SLOWDOWN = 0.7
         const val MAX_SLOWDOWN = 4.0
         const val ARRIVED_M = 250.0
     }
