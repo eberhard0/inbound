@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
+import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -48,6 +49,7 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import java.io.File
+import java.util.Date
 
 /**
  * Full-screen map: where the phone is right now, the planned track, the destination, and what is left.
@@ -120,7 +122,11 @@ internal fun MapScreen(viewModel: SpeedViewModel, onDismiss: () -> Unit) {
                             if (!progress.arrived) {
                                 val left = ((progress.arrivalMs - nowMs) / 1000).coerceAtLeast(0L).toDouble()
                                 Text(
-                                    "${formatEta(left)} · ${leg.type.label} · along the track",
+                                    "Arrive ${DateFormat.getTimeFormat(context).format(Date(maxOf(progress.arrivalMs, nowMs)))} · ${formatEta(left)}",
+                                    color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                                )
+                                Text(
+                                    "${leg.type.label} estimate · distance along the track",
                                     color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 )
                             }
